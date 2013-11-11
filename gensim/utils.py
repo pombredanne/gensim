@@ -22,15 +22,14 @@ import itertools
 import tempfile
 from functools import wraps # for `synchronous` function lock
 from htmlentitydefs import name2codepoint as n2cp # for `decode_htmlentities`
-import threading, time
-from Queue import Queue, Empty
+import multiprocessing
 import shutil
+import traceback
 
 
 try:
     from pattern.en import parse
-    from multiprocessing import Process, Queue as PQueue, cpu_count
-    logger.info("'pattern' package found; utils.Lemmatizater is available for English")
+    logger.info("'pattern' package found; utils.lemmatize() is available for English")
     HAS_PATTERN = True
 except ImportError:
     HAS_PATTERN = False
@@ -52,6 +51,7 @@ def synchronous(tlockname):
         def _synchronizer(self, *args, **kwargs):
             tlock = getattr(self, tlockname)
             logger.debug("acquiring lock %r for %s" % (tlockname, func.func_name))
+
             with tlock: # use lock as a context manager to perform safe acquire/release pairs
                 logger.debug("acquired lock %r for %s" % (tlockname, func.func_name))
                 result = func(self, *args, **kwargs)
@@ -62,6 +62,10 @@ def synchronous(tlockname):
 
 
 class NoCM(object):
+    def acquire(self):
+        pass
+    def release(self):
+        pass
     def __enter__(self):
         pass
     def __exit__(self, type, value, traceback):
@@ -122,14 +126,14 @@ def tokenize(text, lowercase=False, deacc=False, errors="strict", to_lower=False
         yield match.group()
 
 
-def simple_preprocess(doc):
+def simple_preprocess(doc, deacc=False):
     """
     Convert a document into a list of tokens.
 
     This lowercases, tokenizes, stems, normalizes etc. -- the output are final,
     utf8 encoded strings that won't be processed any further.
     """
-    tokens = [token.encode('utf8') for token in tokenize(doc, lower=True, errors='ignore')
+    tokens = [token.encode('utf8') for token in tokenize(doc, lower=True, deacc=deacc, errors='ignore')
             if 2 <= len(token) <= 15 and not token.startswith('_')]
     return tokens
 
@@ -383,101 +387,152 @@ def decode_htmlentities(text):
         return text
 
 
-def chunkize_serial(corpus, chunksize):
+def chunkize_serial(iterable, chunksize, as_numpy=False):
     """
-    Split a stream of values into smaller chunks.
-    Each chunk is of length `chunksize`, except the last one which may be smaller.
-    A once-only input stream (`corpus` from a generator) is ok.
+    Return elements from the iterable in `chunksize`-ed lists. The last returned
+    element may be smaller (if length of collection is not divisible by `chunksize`).
 
-    >>> for chunk in chunkize_serial(xrange(10), 4): print list(chunk)
-    [0, 1, 2, 3]
-    [4, 5, 6, 7]
-    [8, 9]
-
+    >>> print list(grouper(xrange(10), 3))
+    [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
     """
-    if chunksize <= 0:
-        raise ValueError("chunk size must be greater than zero")
-    i = (val for val in corpus) # create generator
+    import numpy
+    it = iter(iterable)
     while True:
-        chunk = [list(itertools.islice(i, int(chunksize)))] # consume `chunksize` items from the generator
-        if not chunk[0]: # generator empty?
+        if as_numpy:
+            # convert each document to a 2d numpy array (~6x faster when transmitting
+            # chunk data over the wire, in Pyro)
+            wrapped_chunk = [[numpy.array(doc) for doc in itertools.islice(it, int(chunksize))]]
+        else:
+            wrapped_chunk = [list(itertools.islice(it, int(chunksize)))]
+        if not wrapped_chunk[0]:
             break
-        yield chunk.pop()
+        # memory opt: wrap the chunk and then pop(), to avoid leaving behind a dangling reference
+        yield wrapped_chunk.pop()
+
+grouper = chunkize_serial
 
 
-def chunkize(corpus, chunksize, maxsize=0):
-    """
-    Split a stream of values into smaller chunks.
-    Each chunk is of length `chunksize`, except the last one which may be smaller.
-    A once-only input stream (`corpus` from a generator) is ok, chunking is done
-    efficiently via itertools.
 
-    If `maxsize > 1`, don't wait idly in between successive chunk `yields`, but
-    rather keep filling a short queue (of size at most `maxsize`) with forthcoming
-    chunks in advance. This is realized by starting a separate thread, and is
-    meant to reduce I/O delays, which can be significant when `corpus` comes
-    from a slow medium (like harddisk).
+class InputQueue(multiprocessing.Process):
+    def __init__(self, q, corpus, chunksize, maxsize, as_numpy):
+        super(InputQueue, self).__init__()
+        self.q = q
+        self.maxsize = maxsize
+        self.corpus = corpus
+        self.chunksize = chunksize
+        self.as_numpy = as_numpy
 
-    If `maxsize==0`, don't fool around with threads and simply yield the chunksize
-    via `chunkize_serial()` (no I/O optimizations).
-
-    >>> for chunk in chunkize(xrange(10), 4): print chunk
-    [0, 1, 2, 3]
-    [4, 5, 6, 7]
-    [8, 9]
-
-    """
-    class InputQueue(threading.Thread):
-        """
-        Help class for threaded `chunkize()`.
-        """
-        def __init__(self, q, corpus, chunksize, maxsize):
-            super(InputQueue, self).__init__()
-            self.q = q
-            self.maxsize = maxsize
-            self.corpus = corpus
-            self.chunksize = chunksize
-
-        def run(self):
+    def run(self):
+        if self.as_numpy:
             import numpy # don't clutter the global namespace with a dependency on numpy
-            i = (val for val in self.corpus) # create generator
-            while True:
+        it = iter(self.corpus)
+        while True:
+            chunk = itertools.islice(it, self.chunksize)
+            if self.as_numpy:
                 # HACK XXX convert documents to numpy arrays, to save memory.
                 # This also gives a scipy warning at runtime:
                 # "UserWarning: indices array has non-integer dtype (float64)"
-                chunk = [numpy.asarray(doc) for doc in itertools.islice(i, self.chunksize)] # consume `chunksize` items from the generator
-                if not chunk: # generator empty?
-                    break
-                logger.info("prepared another chunk of %i documents (qsize=%i)" %
-                            (len(chunk), self.q.qsize()))
-                self.q.put(chunk, block=True)
-    #endclass InputQueue
+                wrapped_chunk = [[numpy.asarray(doc) for doc in chunk]]
+            else:
+                wrapped_chunk = [list(chunk)]
 
-    assert chunksize > 0
+            if not wrapped_chunk[0]:
+                self.q.put(None, block=True)
+                break
 
-    if maxsize > 0:
-        q = Queue(maxsize=maxsize)
-        thread = InputQueue(q, corpus, chunksize, maxsize=maxsize)
-        thread.start()
-        while thread.isAlive() or not q.empty():
             try:
-                yield q.get(block=True, timeout=1)
-            except Empty:
-                pass
-    else:
-        for chunk in chunkize_serial(corpus, chunksize):
+                qsize = self.q.qsize()
+            except NotImplementedError:
+                qsize = '?'
+            logger.debug("prepared another chunk of %i documents (qsize=%s)" %
+                        (len(wrapped_chunk[0]), qsize))
+            self.q.put(wrapped_chunk.pop(), block=True)
+#endclass InputQueue
+
+
+if os.name == 'nt':
+    logger.info("detected Windows; aliasing chunkize to chunkize_serial")
+
+    def chunkize(corpus, chunksize, maxsize=0, as_numpy=False):
+        for chunk in chunkize_serial(corpus, chunksize, as_numpy=as_numpy):
             yield chunk
+else:
+    def chunkize(corpus, chunksize, maxsize=0, as_numpy=False):
+        """
+        Split a stream of values into smaller chunks.
+        Each chunk is of length `chunksize`, except the last one which may be smaller.
+        A once-only input stream (`corpus` from a generator) is ok, chunking is done
+        efficiently via itertools.
+
+        If `maxsize > 1`, don't wait idly in between successive chunk `yields`, but
+        rather keep filling a short queue (of size at most `maxsize`) with forthcoming
+        chunks in advance. This is realized by starting a separate process, and is
+        meant to reduce I/O delays, which can be significant when `corpus` comes
+        from a slow medium (like harddisk).
+
+        If `maxsize==0`, don't fool around with parallelism and simply yield the chunksize
+        via `chunkize_serial()` (no I/O optimizations).
+
+        >>> for chunk in chunkize(xrange(10), 4): print chunk
+        [0, 1, 2, 3]
+        [4, 5, 6, 7]
+        [8, 9]
+
+        """
+        assert chunksize > 0
+
+        if maxsize > 0:
+            q = multiprocessing.Queue(maxsize=maxsize)
+            worker = InputQueue(q, corpus, chunksize, maxsize=maxsize, as_numpy=as_numpy)
+            worker.daemon = True
+            worker.start()
+            while True:
+                chunk = [q.get(block=True)]
+                if chunk[0] is None:
+                    break
+                yield chunk.pop()
+        else:
+            for chunk in chunkize_serial(corpus, chunksize, as_numpy=as_numpy):
+                yield chunk
+
+
+def make_closing(base, **attrs):
+    """
+    Add support for `with Base(attrs) as fout:` to the base class if it's missing.
+    The base class' `close()` method will be called on context exit, to always close the file properly.
+
+    This is needed for gzip.GzipFile, bz2.BZ2File etc in older Pythons (<=2.6), which otherwise
+    raise "AttributeError: GzipFile instance has no attribute '__exit__'".
+
+    """
+    if not hasattr(base, '__enter__'):
+        attrs['__enter__'] = lambda self: self
+    if not hasattr(base, '__exit__'):
+        attrs['__exit__'] = lambda self, type, value, traceback: self.close()
+    return type('Closing' + base.__name__, (base, object), attrs)
+
+
+def smart_open(fname, mode='r'):
+    from os import path
+    _, ext = path.splitext(fname)
+    if ext == '.bz2':
+        from bz2 import BZ2File
+        return make_closing(BZ2File)(fname, mode)
+    if ext == '.gz':
+        from gzip import GzipFile
+        return make_closing(GzipFile)(fname, mode)
+    return open(fname, mode)
 
 
 def pickle(obj, fname, protocol=-1):
     """Pickle object `obj` to file `fname`."""
-    with open(fname, 'wb') as fout: # 'b' for binary, needed on Windows
+    with smart_open(fname, 'wb') as fout: # 'b' for binary, needed on Windows
         cPickle.dump(obj, fout, protocol=protocol)
 
 
 def unpickle(fname):
     """Load pickled object from `fname`"""
-    return cPickle.load(open(fname, 'rb'))
+    return cPickle.load(smart_open(fname, 'rb'))
 
 
 def revdict(d):
@@ -511,29 +566,6 @@ def toptexts(query, texts, index, n=10):
 def randfname(prefix='gensim'):
     randpart = hex(random.randint(0, 0xffffff))[2:]
     return os.path.join(tempfile.gettempdir(), prefix + randpart)
-
-
-def grouper(iterable, chunksize, as_numpy=False):
-    """
-    Return elements from the iterable in `chunksize`-ed lists. The last returned
-    element may be smaller (if length of collection is not divisible by `chunksize`).
-
-    >>> print list(grouper(xrange(10), 3))
-    [[0, 1, 2], [3, 4, 5], [6, 7, 8], [9]]
-    """
-    import numpy
-    it = iter(iterable)
-    while True:
-        if as_numpy:
-            # convert each document to a 2d numpy array (~6x faster when transmitting
-            # chunk data over the wire, in Pyro)
-            wrapped_chunk = [[numpy.array(doc) for doc in itertools.islice(it, int(chunksize))]]
-        else:
-            wrapped_chunk = [list(itertools.islice(it, int(chunksize)))]
-        if not wrapped_chunk[0]:
-            break
-        # memory opt: wrap the chunk and then pop(), to avoid leaving behind a dangling reference
-        yield wrapped_chunk.pop()
 
 
 def upload_chunked(server, docs, chunksize=1000, preprocess=None):
@@ -597,15 +629,26 @@ def pyro_daemon(name, obj, random_suffix=False, ip=None, port=None):
             daemon.requestLoop()
 
 
-# the following is only available when the optional 'pattern' package is installed
 if HAS_PATTERN:
-    ALLOWED_TAGS = re.compile('(NN|VB|JJ|RB)') # ignore everything except nouns, verbs, adjectives and adverbs
-
-    def lemmatize(content):
+    def lemmatize(content, light=False, allowed_tags=re.compile('(NN|VB|JJ|RB)')):
         """
-        Use the English lemmatizer from the `pattern` package to extract tokens in
-        their base form (lemmas: "are, is, being"->"be" etc.).
-        This is a smarter version of stemming.
+        This function is only available when the optional 'pattern' package is installed.
+
+        Use the English lemmatizer from `pattern` to extract tokens in
+        their base form=lemma, e.g. "are, is, being" -> "be" etc.
+        This is a smarter version of stemming. Only consider nouns, verbs, adjectives
+        and adverbs by default (=all other lemmas are discarded).
+
+        >>> lemmatize('Hello World! How is it going?! Nonexistentword, 21')
+        ['world/NN', 'be/VB', 'go/VB', 'nonexistentword/NN']
+
+        From http://www.clips.ua.ac.be/pages/pattern-en#parser :
+
+            The parser is built on a Brill lexicon of tagged words and rules to
+            improve the tags context-wise. With light=False, it uses Brill's contextual
+            rules. With light=True it uses Jason Wiener's simpler ruleset. This
+            ruleset is 5-10x faster but also 25% less accurate.
+
         """
         # tokenization in `pattern` is weird; it gets thrown off by non-letters,
         # producing '==relate/VBN' or '**/NN'... try to preprocess the text a little
@@ -615,76 +658,13 @@ if HAS_PATTERN:
 
         # use simpler, modified pattern.text.en.text.parser.parse that doesn't
         # collapse the output at the end: https://github.com/piskvorky/pattern
-        parsed = parse(content, lemmata=True, collapse=False)
+        parsed = parse(content, lemmata=True, collapse=False, light=light)
         result = []
         for sentence in parsed:
             for token, tag, _, _, lemma in sentence:
                 if 2 <= len(lemma) <= 15 and not lemma.startswith('_'):
-                    if ALLOWED_TAGS.match(tag):
+                    if allowed_tags.match(tag):
                         lemma += "/" + tag[:2]
                         result.append(lemma.encode('utf8'))
         return result
-
-
-    def lemmatize_queue(qin, qout):
-        while True:
-            seq_id, content = qin.get()
-            if seq_id is None:
-                return
-            qout.put((seq_id, lemmatize(content)))
-
-
-    class Lemmatizer(object):
-        """
-        Wraps the lemmatize() fnc so that input can be processed in parallel, to
-        speed things up.
-
-        Main methods are `feed(content)`, which puts the content in queue for
-        lemmatization, and `read()`, which returns lemmatized content when it's ready.
-
-        Note that the order of content entered and read back isn't necessarily the same!
-        Use the sequence id returned from feed/read to match input to output.
-
-        This class is NOT thread-safe.
-        """
-        FEED_MAX_QUEUE = 1000 # block after the parsing queue has reached this length -- new feed()/read() calls will have to wait
-
-        def __init__(self, num_workers=cpu_count()):
-            logger.info("initializing lemmatizer with %i processes" % num_workers)
-            self.num_workers = num_workers
-            self.qin = PQueue(maxsize=Lemmatizer.FEED_MAX_QUEUE)
-            self.qout = PQueue(maxsize=Lemmatizer.FEED_MAX_QUEUE)
-            # start up processes that will be parsing in parallel
-            self.prcs = []
-            for _ in xrange(self.num_workers):
-                prc = Process(target=lemmatize_queue, args=(self.qin, self.qout))
-                prc.daemon = True
-                prc.start()
-                self.prcs.append(prc)
-
-        def feed(self, content):
-            seq_id = content.__hash__()
-            self.qin.put((seq_id, content))
-            return seq_id
-
-        def read(self):
-            seq_id, lemmas = self.qout.get()
-            if seq_id is None:
-                logger.warning('lemmatizer failed for input #%s' % seq_id)
-            return seq_id, lemmas
-
-        def has_results(self):
-            """The next call to read() won't block (not thread-safe!)."""
-            return not self.qout.empty()
-
-        def __del__(self):
-            try:
-                for prc in self.prcs:
-                    prc.terminate()
-                logger.info("terminated %i lemmatizer processes" % self.num_workers)
-            except:
-                # ignore errors at interpreter tear-down
-                pass
-
-    lemmatizer = Lemmatizer()
 #endif HAS_PATTERN

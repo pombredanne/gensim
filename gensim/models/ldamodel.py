@@ -175,6 +175,9 @@ class LdaModel(interfaces.TransformationABC):
     def __init__(self, corpus=None, num_topics=100, id2word=None, distributed=False,
                  chunksize=2000, passes=1, update_every=1, alpha=None, eta=None, decay=0.5):
         """
+        If given, start training from the iterable `corpus` straight away. If not given,
+        the model is left untrained (presumably because you want to call `update()` manually).
+
         `num_topics` is the number of requested latent topics to be extracted from
         the training corpus.
 
@@ -203,7 +206,7 @@ class LdaModel(interfaces.TransformationABC):
             raise ValueError('at least one of corpus/id2word must be specified, to establish input space dimensionality')
 
         if self.id2word is None:
-            logger.info("no word id mapping provided; initializing from corpus, assuming identity")
+            logger.warning("no word id mapping provided; initializing from corpus, assuming identity")
             self.id2word = utils.dict_from_corpus(corpus)
             self.num_terms = len(self.id2word)
         else:
@@ -257,12 +260,17 @@ class LdaModel(interfaces.TransformationABC):
 
         # Initialize the variational distribution q(beta|lambda)
         self.state = LdaState(self.eta, (self.num_topics, self.num_terms))
-        self.state.sstats = numpy.random.gamma(100., 1./100., (self.num_topics, self.num_terms))
+        self.state.sstats = numpy.random.gamma(100., 1. / 100., (self.num_topics, self.num_terms))
         self.sync_state()
 
         # if a training corpus was provided, start estimating the model right away
         if corpus is not None:
             self.update(corpus)
+
+
+    def __str__(self):
+        return "LdaModel(num_terms=%s, num_topics=%s, decay=%s, chunksize=%s, alpha=%s)" % \
+                (self.num_terms, self.num_topics, self.decay, self.chunksize, self.alpha)
 
 
     def sync_state(self):
@@ -293,10 +301,11 @@ class LdaModel(interfaces.TransformationABC):
             _ = len(chunk)
         except:
             chunk = list(chunk) # convert iterators/generators to plain list, so we have len() etc.
-        logger.debug("performing inference on a chunk of %i documents" % len(chunk))
+        if len(chunk) > 1:
+            logger.debug("performing inference on a chunk of %i documents" % len(chunk))
 
         # Initialize the variational distribution q(theta|gamma) for the chunk
-        gamma = numpy.random.gamma(100., 1./100., (len(chunk), self.num_topics))
+        gamma = numpy.random.gamma(100., 1. / 100., (len(chunk), self.num_topics))
         Elogtheta = dirichlet_expectation(gamma)
         expElogtheta = numpy.exp(Elogtheta)
         if collect_sstats:
@@ -372,7 +381,7 @@ class LdaModel(interfaces.TransformationABC):
         """
         Train the model with new documents, by EM-iterating over `corpus` until
         the topics converge (or until the maximum number of allowed iterations
-        is reached).
+        is reached). `corpus` must be an iterable (repeatable stream of documents),
 
         In distributed mode, the E step is distributed over a cluster of machines.
 
@@ -406,6 +415,7 @@ class LdaModel(interfaces.TransformationABC):
         if lencorpus == 0:
             logger.warning("LdaModel.update() called with an empty corpus")
             return
+
         self.state.numdocs += lencorpus
 
         if update_every > 0:
@@ -432,7 +442,9 @@ class LdaModel(interfaces.TransformationABC):
                 other = LdaState(self.eta, self.state.sstats.shape)
             dirty = False
 
+            reallen = 0
             for chunk_no, chunk in enumerate(utils.grouper(corpus, chunksize, as_numpy=True)):
+                reallen += len(chunk)  # keep track of how many documents we've processed so far
                 if self.dispatcher:
                     # add the chunk to dispatcher's job queue, so workers can munch on it
                     logger.info('PROGRESS: iteration %i, dispatching documents up to #%i/%i' %
@@ -462,6 +474,8 @@ class LdaModel(interfaces.TransformationABC):
                         other = LdaState(self.eta, self.state.sstats.shape)
                     dirty = False
             #endfor single corpus iteration
+            if reallen != lencorpus:
+                raise RuntimeError("input corpus size changed during training (don't use generators as input)")
 
             if dirty:
                 # finish any remaining updates
@@ -535,7 +549,7 @@ class LdaModel(interfaces.TransformationABC):
 
 
     def print_topics(self, topics=10, topn=10):
-        self.show_topics(topics, topn, True)
+        return self.show_topics(topics, topn, log=True)
 
     def show_topics(self, topics=10, topn=10, log=False, formatted=True):
         """
@@ -545,12 +559,15 @@ class LdaModel(interfaces.TransformationABC):
         Unlike LSA, there is no ordering between the topics in LDA.
         The printed `topics <= self.num_topics` subset of all topics is therefore
         arbitrary and may change between two runs.
+
+        Set `formatted=True` to return the topics as a list of strings, or `False` as lists of (weight, word) pairs.
+
         """
         if topics < 0:
             # print all topics if `topics` is negative
             topics = self.num_topics
         topics = min(topics, self.num_topics)
-        shown  = []
+        shown = []
         for i in xrange(topics):
             if formatted:
                 topic = self.print_topic(i, topn=topn)
@@ -588,4 +605,12 @@ class LdaModel(interfaces.TransformationABC):
         topic_dist = gamma[0] / sum(gamma[0]) # normalize to proper distribution
         return [(topicid, topicvalue) for topicid, topicvalue in enumerate(topic_dist)
                 if topicvalue >= eps] # ignore document's topics that have prob < eps
+
+
+    def save(self, fname):
+        dispatcher, self.dispatcher = self.dispatcher, None
+        try:
+            super(LdaModel, self).save(fname)
+        finally:
+            self.dispatcher = dispatcher
 #endclass LdaModel

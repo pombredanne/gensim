@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2011 Radim Rehurek <radimrehurek@seznam.cz>
+# Copyright (C) 2013 Radim Rehurek <radimrehurek@seznam.cz>
 # Licensed under the GNU LGPL v2.1 - http://www.gnu.org/licenses/lgpl.html
 
 """
@@ -73,7 +73,6 @@ except ImportError:
     pass
 
 
-
 class Shard(utils.SaveLoad):
     """
     A proxy class that represents a single shard instance within a Similarity
@@ -84,33 +83,35 @@ class Shard(utils.SaveLoad):
 
     """
     def __init__(self, fname, index):
-        self.fname = fname
+        self.dirname, self.fname = os.path.split(fname)
         self.length = len(index)
         self.cls = index.__class__
-        logger.info("saving index shard to %s" % fname)
-        index.save(fname)
+        logger.info("saving index shard to %s" % self.fullname())
+        index.save(self.fullname())
         self.index = self.get_index()
 
+    def fullname(self):
+        return os.path.join(self.dirname, self.fname)
 
     def __len__(self):
         return self.length
 
     def __getstate__(self):
         result = self.__dict__.copy()
-        del result['index']
+        # (S)MS objects must be loaded via load() because of mmap (simple pickle.load won't do)
+        if 'index' in result:
+            del result['index']
         return result
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.index = self.get_index()
-
     def __str__(self):
-        return ("%s Shard(%i documents in %s)" % (self.cls.__name__, len(self), self.fname))
+        return ("%s Shard(%i documents in %s)" % (self.cls.__name__, len(self), self.fullname()))
 
 
     def get_index(self):
-        logger.debug("mmaping index from %s" % self.fname)
-        return self.cls.load(self.fname)
+        if not hasattr(self, 'index'):
+            logger.debug("mmaping index from %s" % self.fullname())
+            self.index = self.cls.load(self.fullname())
+        return self.index
 
 
     def get_document_id(self, pos):
@@ -120,11 +121,11 @@ class Shard(utils.SaveLoad):
         MatrixSimilarity and scipy.sparse for SparseMatrixSimilarity.
         """
         assert 0 <= pos < len(self), "requested position out of range"
-        return self.index.index[pos]
+        return self.get_index().index[pos]
 
 
     def __getitem__(self, query):
-        index = self.index
+        index = self.get_index()
         try:
             index.num_best = self.num_best
             index.normalize = self.normalize
@@ -155,10 +156,11 @@ class Similarity(interfaces.SimilarityABC):
     def __init__(self, output_prefix, corpus, num_features, num_best=None, chunksize=1024, shardsize=32768):
         """
         Construct the index from `corpus`. The index can be later extended by calling
-        the `add_documents` method. Documents are split into shards of `shardsize`
-        documents each, converted to a matrix (for fast BLAS calls) and stored to disk
-        under `output_prefix.shard_number` (=you need write access to that location).
-        If you don't specify an output prefix, a random filename in temp will be used.
+        the `add_documents` method. **Note**: documents are split (internally, transparently)
+        into shards of `shardsize` documents each, converted to a matrix, for faster BLAS calls.
+        Each shard is stored to disk under `output_prefix.shard_number` (=you need write
+        access to that location). If you don't specify an output prefix, a random
+        filename in temp will be used.
 
         `shardsize` should be chosen so that a `shardsize x chunksize` matrix of floats
         fits comfortably into main memory.
@@ -174,10 +176,9 @@ class Similarity(interfaces.SimilarityABC):
         [0.0, 0.0, 0.2, 0.13, 0.8, 0.0, 0.1]
 
         If `num_best` is set, queries return only the `num_best` most similar documents,
-        always leaving out documents for which the similarity is 0
-        (i.e. vectors with all dimensions zero and vectors with non-zero dimensions, but none in common).
-        If the input vector itself has only dimensions with value zero (the sparse representation is empty),
-        the returned list will always be empty.
+        always leaving out documents for which the similarity is 0.
+        If the input vector itself only has features with zero values (=the sparse
+        representation is empty), the returned list will always be empty.
 
         >>> index.num_best = 3
         >>> index[query] # return at most "num_best" of `(index_of_document, similarity)` tuples
@@ -362,6 +363,7 @@ class Similarity(interfaces.SimilarityABC):
             # gc doesn't seem to collect the Pools, eventually leading to
             # "IOError 24: too many open files". so let's terminate it manually.
             pool.terminate()
+
         return result
 
 
@@ -433,8 +435,17 @@ class Similarity(interfaces.SimilarityABC):
                 # (unlike numpy). so, clip the end of the chunk explicitly to make
                 # scipy.sparse happy
                 chunk_end = min(query.shape[0], chunk_start + chunksize)
-                chunk = query[chunk_start : chunk_end] # create a view
+                chunk = query[chunk_start: chunk_end] # create a view
                 yield chunk
+
+
+    def check_moved(self):
+        """
+        Update shard locations, in case the server directory has moved on filesystem.
+        """
+        dirname = os.path.dirname(self.output_prefix)
+        for shard in self.shards:
+            shard.dirname = dirname
 
 
     def save(self, fname=None):
@@ -475,7 +486,7 @@ class MatrixSimilarity(interfaces.SimilarityABC):
 
         """
         if num_features is None:
-            logger.info("scanning corpus to determine the number of features")
+            logger.warning("scanning corpus to determine the number of features (consider setting `num_features` explicitly)")
             num_features = 1 + utils.get_max_id(corpus)
 
         self.num_features = num_features
@@ -484,6 +495,8 @@ class MatrixSimilarity(interfaces.SimilarityABC):
         self.chunksize = chunksize
 
         if corpus is not None:
+            if self.num_features <= 0:
+                raise ValueError("cannot index a corpus with zero features (you must specify either `num_features` or a non-empty corpus in the constructor)")
             logger.info("creating matrix for %s documents and %i features" %
                          (len(corpus), num_features))
             self.index = numpy.empty(shape=(len(corpus), num_features), dtype=dtype)

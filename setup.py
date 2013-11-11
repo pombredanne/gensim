@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
-# Copyright (C) 2011 Radim Rehurek <radimrehurek@seznam.cz>
+# Copyright (C) 2012 Radim Rehurek <radimrehurek@seznam.cz>
 # Licensed under the GNU LGPL v2.1 - http://www.gnu.org/licenses/lgpl.html
 
 """
@@ -25,10 +25,9 @@ def read(fname):
     return open(os.path.join(os.path.dirname(__file__), fname)).read()
 
 
-
 setup(
     name = 'gensim',
-    version = '0.8.4',
+    version = '0.8.8',
     description = 'Python framework for fast Vector Space Modelling',
     long_description = read('README.rst'),
 
@@ -42,7 +41,7 @@ setup(
     download_url = 'http://pypi.python.org/pypi/gensim',
 
     keywords = 'Singular Value Decomposition, Latent Semantic Indexing, SVD, LSA, '
-    'LSI, LDA, Latent Dirichlet Allocation, VSM, Random Projections, TFIDF',
+    'LSI, LDA, Latent Dirichlet Allocation, VSM, Random Projections, TFIDF, word2vec',
 
     license = 'LGPL',
     platforms = 'any',
