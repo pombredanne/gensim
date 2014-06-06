@@ -6,7 +6,11 @@
 
 
 """
-Module for Latent Semantic Indexing.
+Module for Latent Semantic Analysis (aka Latent Semantic Indexing) in Python.
+
+Implements scalable truncated Singular Value Decomposition in Python. The SVD
+decomposition can be updated with new observations at any time (online, incremental,
+memory-efficient training).
 
 This module actually contains several algorithms for decomposition of large corpora, a
 combination of which effectively and transparently allows building LSI models for:
@@ -20,8 +24,8 @@ combination of which effectively and transparently allows building LSI models fo
 * distributed computing for very large corpora, making use of a cluster of
   machines
 
-Wall-clock performance on the English Wikipedia (2G corpus positions, 3.2M
-documents, 100K features, 0.5G non-zero entries in the final TF-IDF matrix),
+Wall-clock `performance on the English Wikipedia <http://radimrehurek.com/gensim/wiki.html>`_
+(2G corpus positions, 3.2M documents, 100K features, 0.5G non-zero entries in the final TF-IDF matrix),
 requesting the top 400 LSI factors:
 
 
@@ -47,14 +51,16 @@ with dual core Xeon 2.0GHz, 4GB RAM, ATLAS
 
 
 import logging
-import itertools
 import sys
 
 import numpy
+import scipy.linalg
 import scipy.sparse
 from scipy.sparse import sparsetools
 
 from gensim import interfaces, matutils, utils
+from six import iterkeys
+from six.moves import xrange
 
 
 logger = logging.getLogger('gensim.models.lsimodel')
@@ -99,7 +105,7 @@ def ascarray(a, name=''):
 
 
 class Projection(utils.SaveLoad):
-    def __init__(self, m, k, docs=None, use_svdlibc=False):
+    def __init__(self, m, k, docs=None, use_svdlibc=False, power_iters=P2_EXTRA_ITERS, extra_dims=P2_EXTRA_DIMS):
         """
         Construct the (U, S) projection from a corpus `docs`. The projection can
         be later updated by merging it with another Projection via `self.merge()`.
@@ -109,12 +115,15 @@ class Projection(utils.SaveLoad):
         the higher-level `LsiModel` class.
         """
         self.m, self.k = m, k
+        self.power_iters = power_iters
+        self.extra_dims = extra_dims
         if docs is not None:
             # base case decomposition: given a job `docs`, compute its decomposition,
             # *in-core*.
             if not use_svdlibc:
-                u, s = stochastic_svd(docs, k, chunksize=sys.maxint, num_terms=m,
-                    power_iters=P2_EXTRA_ITERS, extra_dims=P2_EXTRA_DIMS)
+                u, s = stochastic_svd(docs, k, chunksize=sys.maxsize,
+                    num_terms=m, power_iters=self.power_iters,
+                    extra_dims=self.extra_dims)
             else:
                 try:
                     import sparsesvd
@@ -134,7 +143,7 @@ class Projection(utils.SaveLoad):
 
 
     def empty_like(self):
-        return Projection(self.m, self.k)
+        return Projection(self.m, self.k, power_iters=self.power_iters, extra_dims=self.extra_dims)
 
 
     def merge(self, other, decay=1.0):
@@ -183,10 +192,11 @@ class Projection(utils.SaveLoad):
             # SVD again, but over k*k^T.
             # see http://www.mail-archive.com/numpy-discussion@scipy.org/msg07224.html and
             # bug ticket http://projects.scipy.org/numpy/ticket/706
-            u_k, s_k, _ = numpy.linalg.svd(k, full_matrices=False) # TODO *ugly overkill*!! only need first self.k SVD factors... but there is no LAPACK wrapper for partial svd/eigendecomp in numpy :(
-        except numpy.linalg.LinAlgError:
+            # sdoering: replaced numpy's linalg.svd with scipy's linalg.svd:
+            u_k, s_k, _ = scipy.linalg.svd(k, full_matrices=False) # TODO *ugly overkill*!! only need first self.k SVD factors... but there is no LAPACK wrapper for partial svd/eigendecomp in numpy :( //sdoering: maybe there is one in scipy?
+        except scipy.linalg.LinAlgError:
             logger.error("SVD(A) failed; trying SVD(A * A^T)")
-            u_k, s_k, _ = numpy.linalg.svd(numpy.dot(k, k.T), full_matrices=False) # if this fails too, give up with an exception
+            u_k, s_k, _ = scipy.linalg.svd(numpy.dot(k, k.T), full_matrices=False) # if this fails too, give up with an exception
             s_k = numpy.sqrt(s_k) # go back from eigen values to singular values
 
         k = clip_spectrum(s_k**2, self.k)
@@ -227,9 +237,11 @@ class LsiModel(interfaces.TransformationABC):
 
     The left singular vectors are stored in `lsi.projection.u`, singular values
     in `lsi.projection.s`. Right singular vectors can be reconstructed from the output
-    of `lsi[training_corpus]`, if needed.
+    of `lsi[training_corpus]`, if needed. See also FAQ [2]_.
 
     Model persistency is achieved via its load/save methods.
+
+    .. [2] https://github.com/piskvorky/gensim/wiki/Recipes-&-FAQ#q4-how-do-you-output-the-u-s-vt-matrices-of-lsi
 
     """
     def __init__(self, corpus=None, num_topics=200, id2word=None, chunksize=20000,
@@ -252,7 +264,7 @@ class LsiModel(interfaces.TransformationABC):
         `power_iters` and `extra_samples` affect the accuracy of the stochastic
         multi-pass algorithm, which is used either internally (`onepass=True`) or
         as the front-end algorithm (`onepass=False`). Increasing the number of
-        power iterations improves accuracy, but lowers performance. See [2]_ for
+        power iterations improves accuracy, but lowers performance. See [3]_ for
         some hard numbers.
 
         Turn on `distributed` to enable distributed computing.
@@ -260,11 +272,11 @@ class LsiModel(interfaces.TransformationABC):
         Example:
 
         >>> lsi = LsiModel(corpus, num_topics=10)
-        >>> print lsi[doc_tfidf] # project some document into LSI space
+        >>> print(lsi[doc_tfidf]) # project some document into LSI space
         >>> lsi.add_documents(corpus2) # update LSI on additional documents
-        >>> print lsi[doc_tfidf]
+        >>> print(lsi[doc_tfidf])
 
-        .. [2] http://nlp.fi.muni.cz/~xrehurek/nips/rehurek_nips.pdf
+        .. [3] http://nlp.fi.muni.cz/~xrehurek/nips/rehurek_nips.pdf
 
         """
         self.id2word = id2word
@@ -282,14 +294,14 @@ class LsiModel(interfaces.TransformationABC):
             raise ValueError('at least one of corpus/id2word must be specified, to establish input space dimensionality')
 
         if self.id2word is None:
-            logger.info("no word id mapping provided; initializing from corpus, assuming identity")
+            logger.warning("no word id mapping provided; initializing from corpus, assuming identity")
             self.id2word = utils.dict_from_corpus(corpus)
             self.num_terms = len(self.id2word)
         else:
             self.num_terms = 1 + max([-1] + self.id2word.keys())
 
         self.docs_processed = 0
-        self.projection = Projection(self.num_terms, self.num_topics)
+        self.projection = Projection(self.num_terms, self.num_topics, power_iters=self.power_iters, extra_dims=self.extra_samples)
 
         self.numworkers = 1
         if not distributed:
@@ -306,11 +318,12 @@ class LsiModel(interfaces.TransformationABC):
                 logger.debug("looking for dispatcher at %s" % str(dispatcher._pyroUri))
                 dispatcher.initialize(id2word=self.id2word, num_topics=num_topics,
                                       chunksize=chunksize, decay=decay,
+                                      power_iters=self.power_iters, extra_samples=self.extra_samples,
                                       distributed=False, onepass=onepass)
                 self.dispatcher = dispatcher
                 self.numworkers = len(dispatcher.getworkers())
                 logger.info("using distributed version with %i workers" % self.numworkers)
-            except Exception, err:
+            except Exception as err:
                 # distributed version was specifically requested, so this is an error state
                 logger.error("failed to initialize distributed LSI (%s)" % err)
                 raise RuntimeError("failed to initialize distributed LSI (%s)" % err)
@@ -353,6 +366,9 @@ class LsiModel(interfaces.TransformationABC):
             else:
                 # the one-pass algo
                 doc_no = 0
+                if self.dispatcher:
+                    logger.info('initializing %s workers' % self.numworkers)
+                    self.dispatcher.reset()
                 for chunk_no, chunk in enumerate(utils.grouper(corpus, chunksize)):
                     logger.info("preparing a new chunk of documents")
                     nnz = sum(len(doc) for doc in chunk)
@@ -370,7 +386,7 @@ class LsiModel(interfaces.TransformationABC):
                         logger.info("dispatched documents up to #%s" % doc_no)
                     else:
                         # serial version, there is only one "worker" (myself) => process the job directly
-                        update = Projection(self.num_terms, self.num_topics, job)
+                        update = Projection(self.num_terms, self.num_topics, job, extra_dims=self.extra_samples, power_iters=self.power_iters)
                         del job
                         self.projection.merge(update, decay=decay)
                         del update
@@ -386,7 +402,7 @@ class LsiModel(interfaces.TransformationABC):
         else:
             assert not self.dispatcher, "must be in serial mode to receive jobs"
             assert self.onepass, "distributed two-pass algo not supported yet"
-            update = Projection(self.num_terms, self.num_topics, corpus.tocsc())
+            update = Projection(self.num_terms, self.num_topics, corpus.tocsc(), extra_dims=self.extra_samples, power_iters=self.power_iters)
             self.projection.merge(update, decay=decay)
             logger.info("processed sparse job of %i documents" % (corpus.shape[1]))
 
@@ -407,17 +423,32 @@ class LsiModel(interfaces.TransformationABC):
         # if the input vector is in fact a corpus, return a transformed corpus as a result
         is_corpus, bow = utils.is_corpus(bow)
         if is_corpus and chunksize:
-            # by default, transform 256 documents at once, when called as `lsi[corpus]`.
+            # by default, transform `chunksize` documents at once, when called as `lsi[corpus]`.
             # this chunking is completely transparent to the user, but it speeds
             # up internal computations (one mat * mat multiplication, instead of
-            # 256 smaller mat * vec multiplications).
+            # `chunksize` smaller mat * vec multiplications).
             return self._apply(bow, chunksize=chunksize)
 
         if not is_corpus:
             bow = [bow]
-        vec = matutils.corpus2csc(bow, num_terms=self.num_terms)
 
+        # convert input to scipy.sparse CSC, then do "sparse * dense = dense" multiplication
+        vec = matutils.corpus2csc(bow, num_terms=self.num_terms, dtype=self.projection.u.dtype)
         topic_dist = (vec.T * self.projection.u[:, :self.num_topics]).T # (x^T * u).T = u^-1 * x
+
+        # # convert input to dense, then do dense * dense multiplication
+        # # ± same performance as above (BLAS dense * dense is better optimized than scipy.sparse), but consumes more memory
+        # vec = matutils.corpus2dense(bow, num_terms=self.num_terms, num_docs=len(bow))
+        # topic_dist = numpy.dot(self.projection.u[:, :self.num_topics].T, vec)
+
+        # # use numpy's advanced indexing to simulate sparse * dense
+        # # ± same speed again
+        # u = self.projection.u[:, :self.num_topics]
+        # topic_dist = numpy.empty((u.shape[1], len(bow)), dtype=u.dtype)
+        # for vecno, vec in enumerate(bow):
+        #     indices, data = zip(*vec) if vec else ([], [])
+        #     topic_dist[:, vecno] = numpy.dot(u.take(indices, axis=0).T, numpy.array(data, dtype=u.dtype))
+
         if scaled:
             topic_dist = (1.0 / self.projection.s[:self.num_topics]) * topic_dist # s^-1 * u^-1 * x
 
@@ -459,11 +490,11 @@ class LsiModel(interfaces.TransformationABC):
 
     def show_topics(self, num_topics=-1, num_words=10, log=False, formatted=True):
         """
-        Show `num_topics` most significant topics (show all by default).
-        For each topic, show `num_words` most significant words (10 words by defaults).
+        Return `num_topics` most significant topics (return all by default).
+        For each topic, show `num_words` most significant words (10 words by default).
 
-        Return the shown topics as a list -- a list of strings if `formatted` is
-        True, or a list of  (value, word) 2-tuples if it's False.
+        The topics are returned as a list -- a list of strings if `formatted` is
+        True, or a list of (weight, word) 2-tuples if False.
 
         If `log` is True, also output this result to log.
 
@@ -486,7 +517,7 @@ class LsiModel(interfaces.TransformationABC):
 
     def print_topics(self, num_topics=5, num_words=10):
         """Alias for `show_topics()` which prints the top 5 topics to log."""
-        self.show_topics(num_topics=num_topics, num_words=num_words, log=True)
+        return self.show_topics(num_topics=num_topics, num_words=num_words, log=True)
 
     def print_debug(self, num_topics=5, num_words=10):
         """
@@ -502,40 +533,32 @@ class LsiModel(interfaces.TransformationABC):
                    num_words=num_words)
 
 
-    def save(self, fname):
+    def save(self, fname, *args, **kwargs):
         """
-        Override the default `save` (which uses cPickle), because that's
-        too inefficient and cPickle has bugs. Instead, single out the large transformation
-        matrix and store that separately in binary format (that can be directly
-        mmap'ed back in `load()`), under `fname.npy`.
-        """
-        logger.info("storing %s object to %s and %s" % (self.__class__.__name__, fname, fname + '.npy'))
-        if self.projection.u is None:
-            # model not initialized: there is no projection
-            utils.pickle(self, fname)
+        Save the model to file.
 
-        # first, remove the projection from self.__dict__, so it doesn't get pickled
-        u = self.projection.u
-        del self.projection.u
-        try:
-            utils.pickle(self, fname) # store projection-less object
-            numpy.save(fname + '.npy', ascarray(u)) # store projection
-        finally:
-            self.projection.u = u
+        Large internal arrays may be stored into separate files, with `fname` as prefix.
+
+        """
+        if self.projection is not None:
+            self.projection.save(fname + '.projection', *args, **kwargs)
+        super(LsiModel, self).save(fname, *args, ignore=['projection', 'dispatcher'], **kwargs)
 
 
     @classmethod
-    def load(cls, fname):
+    def load(cls, fname, *args, **kwargs):
         """
         Load a previously saved object from file (also see `save`).
+
+        Large arrays are mmap'ed back as read-only (shared memory).
+
         """
-        logger.debug("loading %s object from %s" % (cls.__name__, fname))
-        result = utils.unpickle(fname)
-        ufname = fname + '.npy'
+        kwargs['mmap'] = kwargs.get('mmap', 'r')
+        result = super(LsiModel, cls).load(fname, *args, **kwargs)
         try:
-            result.projection.u = numpy.load(ufname, mmap_mode='r') # load back as read-only
-        except:
-            logger.debug("failed to load mmap'ed projection from %s" % ufname)
+            result.projection = super(LsiModel, cls).load(fname + '.projection', *args, **kwargs)
+        except Exception as e:
+            logging.warning("failed to load projection from %s: %s" % (fname + '.state', e))
         return result
 #endclass LsiModel
 
@@ -555,7 +578,7 @@ def print_debug(id2token, u, s, topics, num_words=10, num_neg=None):
             result.setdefault(topic, []).append((udiff[topic], uvecno))
 
     logger.debug("printing %i+%i salient words" % (num_words, num_neg))
-    for topic in sorted(result.iterkeys()):
+    for topic in sorted(iterkeys(result)):
         weights = sorted(result[topic], key=lambda x: -abs(x[0]))
         _, most = weights[0]
         if u[most, topic] < 0.0: # the most significant word has a negative sign => flip sign of u[most]
@@ -584,21 +607,23 @@ def print_debug(id2token, u, s, topics, num_words=10, num_neg=None):
 def stochastic_svd(corpus, rank, num_terms, chunksize=20000, extra_dims=None,
                   power_iters=0, dtype=numpy.float64, eps=1e-6):
     """
-    Return (U, S): the left singular vectors and the singular values of the streamed
-    input corpus `corpus` [3]_.
+    Run truncated Singular Value Decomposition (SVD) on a sparse input.
 
-    This may actually return less than the requested number of top `rank` factors,
-    in case the input is of lower rank. The `extra_dims` (oversampling) and especially
+    Return (U, S): the left singular vectors and the singular values of the input
+    data stream `corpus` [4]_. The corpus may be larger than RAM (iterator of vectors).
+
+    This may return less than the requested number of top `rank` factors, in case
+    the input itself is of lower rank. The `extra_dims` (oversampling) and especially
     `power_iters` (power iterations) parameters affect accuracy of the decomposition.
 
-    This algorithm uses `2+power_iters` passes over the data. In case you can only
-    afford a single pass over the input corpus, set `onepass=True` in :class:`LsiModel`
-    and avoid using this algorithm directly.
+    This algorithm uses `2+power_iters` passes over the input data. In case you can only
+    afford a single pass, set `onepass=True` in :class:`LsiModel` and avoid using
+    this function directly.
 
     The decomposition algorithm is based on
     **Halko, Martinsson, Tropp. Finding structure with randomness, 2009.**
 
-    .. [3] If `corpus` is a scipy.sparse matrix instead, it is assumed the whole
+    .. [4] If `corpus` is a scipy.sparse matrix instead, it is assumed the whole
        corpus fits into core memory and a different (more efficient) code path is chosen.
     """
     rank = int(rank)
@@ -679,7 +704,7 @@ def stochastic_svd(corpus, rank, num_terms, chunksize=20000, extra_dims=None,
     if scipy.sparse.issparse(corpus):
         b = qt * corpus
         logger.info("2nd phase: running dense svd on %s matrix" % str(b.shape))
-        u, s, vt = numpy.linalg.svd(b, full_matrices=False)
+        u, s, vt = scipy.linalg.svd(b, full_matrices=False)
         del b, vt
     else:
         # second phase: construct the covariance matrix X = B * B.T, where B = Q.T * A
@@ -697,7 +722,7 @@ def stochastic_svd(corpus, rank, num_terms, chunksize=20000, extra_dims=None,
 
         # now we're ready to compute decomposition of the small matrix X
         logger.info("running dense decomposition on %s covariance matrix" % str(x.shape))
-        u, s, vt = numpy.linalg.svd(x) # could use linalg.eigh, but who cares... and svd returns the factors already sorted :)
+        u, s, vt = scipy.linalg.svd(x) # could use linalg.eigh, but who cares... and svd returns the factors already sorted :)
         s = numpy.sqrt(s) # sqrt to go back from singular values of X to singular values of B = singular values of the corpus
     q = qt.T.copy()
     del qt

@@ -27,6 +27,8 @@
 *.sql
 *.sqlite
 *.pkl
+*.bak
+*.npy
 
 # OS generated files #
 ######################
@@ -41,11 +43,22 @@ Thumbs.db
 .pydevproject
 .settings/
 docs/src/_build/
+docs/_static
 dedan_gensim.tmproj
-gensim.egg-info
+gensim*.egg-info
 *,cover
 .idea
 *.dict
 *.index
 .coverage
+.*.sw[op]
 data
+*.bak
+/build/
+/dist/
+*.prof
+*.lprof
+*.bin
+*.old
+*.model
+*~

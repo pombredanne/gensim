@@ -1,1 +1,8 @@
-/Users/kofola/svn/gensim/simserver/docs/similarities/simserver.rst
+:mod:`simserver` -- Document similarity server
+======================================================
+
+.. automodule:: simserver.simserver
+    :synopsis: Document similarity server
+    :members:
+    :inherited-members:
+

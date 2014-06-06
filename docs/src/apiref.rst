@@ -13,6 +13,7 @@ Modules:
     matutils
     corpora/bleicorpus
     corpora/dictionary
+    corpora/hashdictionary
     corpora/lowcorpus
     corpora/mmcorpus
     corpora/svmlightcorpus
@@ -21,6 +22,7 @@ Modules:
     corpora/ucicorpus
     corpora/indexedcorpus
     models/ldamodel
+    models/ldamallet
     models/lsimodel
     models/tfidfmodel
     models/rpmodel
@@ -30,6 +32,7 @@ Modules:
     models/lsi_worker
     models/lda_dispatcher
     models/lda_worker
+    models/word2vec
     similarities/docsim
     similarities/simserver
 
