@@ -32,25 +32,10 @@ from __future__ import with_statement
 import logging
 
 from gensim import interfaces, utils
-from dictionary import Dictionary
+from six import string_types
+from gensim.corpora.dictionary import Dictionary
 
 logger = logging.getLogger('gensim.corpora.textcorpus')
-
-
-def getstream(input):
-    """
-    If input is a filename (string), return `open(input)`.
-    If input is a file-like object, reset it to the beginning with `input.seek(0)`.
-    """
-    assert input is not None
-    if isinstance(input, basestring):
-        # input was a filename: open as text file
-        result = open(input)
-    else:
-        # input was a file-like object (BZ2, Gzip etc.); reset the stream to its beginning
-        result = input
-        result.seek(0)
-    return result
 
 
 class TextCorpus(interfaces.CorpusABC):
@@ -71,12 +56,12 @@ class TextCorpus(interfaces.CorpusABC):
         super(TextCorpus, self).__init__()
         self.input = input
         self.dictionary = Dictionary()
+        self.metadata = False
         if input is not None:
             self.dictionary.add_documents(self.get_texts())
         else:
             logger.warning("No input document stream provided; assuming "
                            "dictionary will be initialized some other way.")
-
 
     def __iter__(self):
         """
@@ -85,12 +70,13 @@ class TextCorpus(interfaces.CorpusABC):
         Iterating over the corpus must yield sparse vectors, one for each document.
         """
         for text in self.get_texts():
-            yield self.dictionary.doc2bow(text, allow_update=False)
-
+            if self.metadata:
+                yield self.dictionary.doc2bow(text[0], allow_update=False), text[1]
+            else:
+                yield self.dictionary.doc2bow(text, allow_update=False)
 
     def getstream(self):
-        return getstream(self.input)
-
+        return utils.file_or_filename(self.input)
 
     def get_texts(self):
         """
@@ -104,12 +90,16 @@ class TextCorpus(interfaces.CorpusABC):
         # Instead of raising NotImplementedError, let's provide a sample implementation:
         # assume documents are lines in a single file (one document per line).
         # Yield each document as a list of lowercase tokens, via `utils.tokenize`.
-        length = 0
-        for lineno, line in enumerate(getstream(self.input)):
-            length += 1
-            yield utils.tokenize(line, lowercase=True)
-        self.length = length
-
+        lineno = -1
+        with self.getstream() as lines:
+            for lineno, line in enumerate(lines):
+                if self.metadata:
+                    yield utils.tokenize(line, lowercase=True), (lineno,)
+                else:
+                    yield utils.tokenize(line, lowercase=True)
+            self.length = lineno + 1 # will be 0 if loop never executes
 
     def __len__(self):
-        return self.length # will throw if corpus not initialized
+        return self.length  # will throw if corpus not initialized
+
+# endclass TextCorpus

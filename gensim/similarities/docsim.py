@@ -41,7 +41,7 @@ To see the speed-up on your machine, run ``python -m gensim.test.simspeed``
 (compare to my results `here <http://groups.google.com/group/gensim/msg/4f6f171a869e4fca?>`_).
 
 There is also a special syntax for when you need similarity of documents in the index
-to the index itself (i.e. query=index documents themselves). This special syntax
+to the index itself (i.e. queries=indexed documents themselves). This special syntax
 already uses the faster, batch queries internally:
 
 >>> for similarities in index: # return all similarities of the 1st index document, then 2nd...
@@ -60,6 +60,7 @@ import numpy
 import scipy.sparse
 
 from gensim import interfaces, utils, matutils
+from six.moves import map as imap, xrange, zip as izip
 
 
 logger = logging.getLogger('gensim.similarities.docsim')
@@ -110,7 +111,7 @@ class Shard(utils.SaveLoad):
     def get_index(self):
         if not hasattr(self, 'index'):
             logger.debug("mmaping index from %s" % self.fullname())
-            self.index = self.cls.load(self.fullname())
+            self.index = self.cls.load(self.fullname(), mmap='r')
         return self.index
 
 
@@ -153,7 +154,7 @@ class Similarity(interfaces.SimilarityABC):
     The shards themselves are simply stored as files to disk and mmap'ed back as needed.
 
     """
-    def __init__(self, output_prefix, corpus, num_features, num_best=None, chunksize=1024, shardsize=32768):
+    def __init__(self, output_prefix, corpus, num_features, num_best=None, chunksize=256, shardsize=32768):
         """
         Construct the index from `corpus`. The index can be later extended by calling
         the `add_documents` method. **Note**: documents are split (internally, transparently)
@@ -193,6 +194,7 @@ class Similarity(interfaces.SimilarityABC):
             self.output_prefix = utils.randfname(prefix='simserver')
         else:
             self.output_prefix = output_prefix
+        logger.info("starting similarity index under %s" % self.output_prefix)
         self.num_features = num_features
         self.num_best = num_best
         self.normalize = True
@@ -308,7 +310,7 @@ class Similarity(interfaces.SimilarityABC):
         else:
             # serial processing, one shard after another
             pool = None
-            result = itertools.imap(query_shard, args)
+            result = imap(query_shard, args)
         return pool, result
 
 
@@ -356,7 +358,7 @@ class Similarity(interfaces.SimilarityABC):
                     shard_result = [convert(doc, shard_no) for doc in result]
                     results.append(shard_result)
                 result = []
-                for parts in itertools.izip(*results):
+                for parts in izip(*results):
                     merged = heapq.nlargest(self.num_best, itertools.chain(*parts), key=lambda item: item[1])
                     result.append(merged)
         if pool:
@@ -448,7 +450,7 @@ class Similarity(interfaces.SimilarityABC):
             shard.dirname = dirname
 
 
-    def save(self, fname=None):
+    def save(self, fname=None, *args, **kwargs):
         """
         Save the object via pickling (also see load) under filename specified in
         the constructor.
@@ -459,7 +461,18 @@ class Similarity(interfaces.SimilarityABC):
         self.close_shard()
         if fname is None:
             fname = self.output_prefix
-        super(Similarity, self).save(fname)
+        super(Similarity, self).save(fname, *args, **kwargs)
+
+    def destroy(self):
+        """
+        Delete all files under self.output_prefix. Object is not usable after calling
+        this method anymore. Use with care!
+
+        """
+        import glob
+        for fname in glob.glob(self.output_prefix + '*'):
+            logger.info("deleting %s" % fname)
+            os.remove(fname)
 #endclass Similarity
 
 
@@ -552,35 +565,6 @@ class MatrixSimilarity(interfaces.SimilarityABC):
         # self.index internally in numpy.dot (very slow).
         result = numpy.dot(self.index, query.T).T # return #queries x #index
         return result # XXX: removed casting the result from array to list; does anyone care?
-
-
-    def save(self, fname):
-        """
-        Override the default `save` (which uses cPickle), because that's
-        too inefficient and cPickle has bugs. Instead, single out the large index
-        matrix and store that separately in binary format (that can be directly
-        mmap'ed), under `fname.npy`. The rest of the object is pickled to `fname`.
-        """
-        logger.info("storing %s object to %s and %s" % (self.__class__.__name__, fname, fname + '.npy'))
-        # first, remove the index from self.__dict__, so it doesn't get pickled
-        index = self.index
-        del self.index
-        try:
-            utils.pickle(self, fname) # store index-less object
-            numpy.save(fname + '.npy', index) # store index
-        finally:
-            self.index = index
-
-
-    @classmethod
-    def load(cls, fname):
-        """
-        Load a previously saved object from file (also see `save`).
-        """
-        logger.debug("loading %s object from %s" % (cls.__name__, fname))
-        result = utils.unpickle(fname)
-        result.index = numpy.load(fname + '.npy', mmap_mode='r') # load back as read-only
-        return result
 #endclass MatrixSimilarity
 
 
@@ -671,41 +655,5 @@ class SparseMatrixSimilarity(interfaces.SimilarityABC):
         else:
             # otherwise, return a 2d matrix (#queries x #index)
             result = result.toarray().T
-        return result
-
-
-    def save(self, fname):
-        """
-        Override the default `save` (which uses cPickle), because that's
-        too inefficient and cPickle has bugs. Instead, single out the large internal
-        arrays and store them separately in binary format (that can be directly
-        mmap'ed), under `fname.array_name.npy`.
-        """
-        logger.info("storing %s object to %s and %s.npy" % (self.__class__.__name__, fname, fname))
-        assert isinstance(self.index, scipy.sparse.csr_matrix)
-        # first, remove the arrays from self.__dict__, so they don't get pickled
-        data, indptr, indices = self.index.data, self.index.indptr, self.index.indices
-        del self.index.data, self.index.indptr, self.index.indices
-        try:
-            utils.pickle(self, fname) # store array-less object
-            # store arrays (.npy suffix is appended by numpy automatically)
-            numpy.save(fname + '.data.npy', data)
-            numpy.save(fname + '.indptr.npy', indptr)
-            numpy.save(fname + '.indices.npy', indices)
-        finally:
-            self.index.data, self.index.indptr, self.index.indices = data, indptr, indices
-
-
-    @classmethod
-    def load(cls, fname):
-        """
-        Load a previously saved object from file (also see `save`).
-        """
-        logger.debug("loading %s object from %s and %s.*.npy" % (cls.__name__, fname, fname))
-        result = utils.unpickle(fname)
-        data = numpy.load(fname + '.data.npy', mmap_mode='r') # load back as read-only
-        indptr = numpy.load(fname + '.indptr.npy', mmap_mode='r')
-        indices = numpy.load(fname + '.indices.npy', mmap_mode='r')
-        result.index.data, result.index.indptr, result.index.indices = data, indptr, indices
         return result
 #endclass SparseMatrixSimilarity

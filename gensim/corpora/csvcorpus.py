@@ -47,7 +47,6 @@ class CsvCorpus(interfaces.CorpusABC):
         self.dialect = csv.Sniffer().sniff(head)
         logger.info("sniffed CSV delimiter=%r, headers=%s" % (self.dialect.delimiter, self.headers))
 
-
     def __iter__(self):
         """
         Iterate over the corpus, returning one sparse vector at a time.
@@ -55,7 +54,7 @@ class CsvCorpus(interfaces.CorpusABC):
         """
         reader = csv.reader(open(self.fname), self.dialect)
         if self.headers:
-            reader.next()  # skip the headers
+            next(reader)    # skip the headers
 
         line_no = -1
         for line_no, line in enumerate(reader):
@@ -64,3 +63,5 @@ class CsvCorpus(interfaces.CorpusABC):
             yield list(enumerate(map(float, line)))
 
         self.length = line_no + 1  # store the total number of CSV rows = documents
+
+# endclass CsvCorpus

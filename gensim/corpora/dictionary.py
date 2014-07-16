@@ -17,17 +17,25 @@ with other dictionary (:func:`Dictionary.merge_with`) etc.
 
 from __future__ import with_statement
 
+from collections import Mapping
+import sys
 import logging
 import itertools
-import UserDict
 
 from gensim import utils
+
+if sys.version_info[0] >= 3:
+    unicode = str
+
+from six import PY3, iteritems, iterkeys, itervalues, string_types
+from six.moves import xrange
+from six.moves import zip as izip
 
 
 logger = logging.getLogger('gensim.corpora.dictionary')
 
 
-class Dictionary(utils.SaveLoad, UserDict.DictMixin):
+class Dictionary(utils.SaveLoad, Mapping):
     """
     Dictionary encapsulates the mapping between normalized words and their integer ids.
 
@@ -51,13 +59,28 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         if len(self.id2token) != len(self.token2id):
             # the word->id mapping has changed (presumably via add_documents);
             # recompute id->word accordingly
-            self.id2token = dict((v, k) for k, v in self.token2id.iteritems())
+            self.id2token = dict((v, k) for k, v in iteritems(self.token2id))
         return self.id2token[tokenid] # will throw for non-existent ids
+
+
+    def __iter__(self):
+        return iter(self.keys())
+
+
+    if PY3:
+        # restore Py2-style dict API
+        iterkeys = __iter__
+
+        def iteritems(self):
+            return self.items()
+
+        def itervalues(self):
+            return self.values()
 
 
     def keys(self):
         """Return a list of all token ids."""
-        return self.token2id.values()
+        return list(self.token2id.values())
 
 
     def __len__(self):
@@ -68,7 +91,8 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
 
 
     def __str__(self):
-        return ("Dictionary(%i unique tokens)" % len(self))
+        some_keys = list(itertools.islice(iterkeys(self.token2id), 5))
+        return "Dictionary(%i unique tokens: %s%s)" % (len(self), some_keys, '...' if len(self) > 5 else '')
 
 
     @staticmethod
@@ -84,7 +108,7 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         This is only a convenience wrapper for calling `doc2bow` on each document
         with `allow_update=True`.
 
-        >>> print Dictionary(["máma mele maso".split(), "ema má máma".split()])
+        >>> print(Dictionary(["máma mele maso".split(), "ema má máma".split()]))
         Dictionary(5 unique tokens)
         """
         for docno, document in enumerate(documents):
@@ -99,7 +123,7 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         """
         Convert `document` (a list of words) into the bag-of-words format = list
         of `(token_id, token_count)` 2-tuples. Each word is assumed to be a
-        **tokenized and normalized** utf-8 encoded string. No further preprocessing
+        **tokenized and normalized** string (either unicode or utf8-encoded). No further preprocessing
         is done on the words in `document`; apply tokenization, stemming etc. before
         calling this method.
 
@@ -112,9 +136,9 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         """
         result = {}
         missing = {}
-        if isinstance(document, basestring):
-            raise TypeError("doc2bow expects an array of utf8 tokens on input, not a string")
-        document = sorted(utils.to_utf8(token) for token in document)
+        if isinstance(document, string_types):
+            raise TypeError("doc2bow expects an array of unicode tokens on input, not a single string")
+        document = sorted(utils.to_unicode(token) for token in document)
         # construct (word, frequency) mapping. in python3 this is done simply
         # using Counter(), but here i use itertools.groupby() for the job
         for word_norm, group in itertools.groupby(document):
@@ -137,11 +161,11 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
             self.num_pos += len(document)
             self.num_nnz += len(result)
             # increase document count for each unique token that appeared in the document
-            for tokenid in result.iterkeys():
+            for tokenid in iterkeys(result):
                 self.dfs[tokenid] = self.dfs.get(tokenid, 0) + 1
 
         # return tokenids, in ascending id order
-        result = sorted(result.iteritems())
+        result = sorted(iteritems(result))
         if return_missing:
             return result, missing
         else:
@@ -166,7 +190,8 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         no_above_abs = int(no_above * self.num_docs) # convert fractional threshold to absolute threshold
 
         # determine which tokens to keep
-        good_ids = (v for v in self.token2id.itervalues() if no_below <= self.dfs[v] <= no_above_abs)
+        good_ids = (v for v in itervalues(self.token2id)
+                      if no_below <= self.dfs.get(v, 0) <= no_above_abs)
         good_ids = sorted(good_ids, key=self.dfs.get, reverse=True)
         if keep_n is not None:
             good_ids = good_ids[:keep_n]
@@ -188,12 +213,20 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         """
         if bad_ids is not None:
             bad_ids = set(bad_ids)
-            self.token2id = dict((token, tokenid) for token, tokenid in self.token2id.iteritems() if tokenid not in bad_ids)
-            self.dfs = dict((tokenid, freq) for tokenid, freq in self.dfs.iteritems() if tokenid not in bad_ids)
+            self.token2id = dict((token, tokenid)
+                                 for token, tokenid in iteritems(self.token2id)
+                                 if tokenid not in bad_ids)
+            self.dfs = dict((tokenid, freq)
+                            for tokenid, freq in iteritems(self.dfs)
+                            if tokenid not in bad_ids)
         if good_ids is not None:
             good_ids = set(good_ids)
-            self.token2id = dict((token, tokenid) for token, tokenid in self.token2id.iteritems() if tokenid in good_ids)
-            self.dfs = dict((tokenid, freq) for tokenid, freq in self.dfs.iteritems() if tokenid in good_ids)
+            self.token2id = dict((token, tokenid)
+                                 for token, tokenid in iteritems(self.token2id)
+                                 if tokenid in good_ids)
+            self.dfs = dict((tokenid, freq)
+                            for tokenid, freq in iteritems(self.dfs)
+                            if tokenid in good_ids)
 
 
     def compactify(self):
@@ -207,25 +240,33 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         logger.debug("rebuilding dictionary, shrinking gaps")
 
         # build mapping from old id -> new id
-        idmap = dict(itertools.izip(self.token2id.itervalues(), xrange(len(self.token2id))))
+        idmap = dict(izip(itervalues(self.token2id), xrange(len(self.token2id))))
 
         # reassign mappings to new ids
-        self.token2id = dict((token, idmap[tokenid]) for token, tokenid in self.token2id.iteritems())
+        self.token2id = dict((token, idmap[tokenid]) for token, tokenid in iteritems(self.token2id))
         self.id2token = {}
-        self.dfs = dict((idmap[tokenid], freq) for tokenid, freq in self.dfs.iteritems())
+        self.dfs = dict((idmap[tokenid], freq) for tokenid, freq in iteritems(self.dfs))
 
 
-    def save_as_text(self, fname):
+    def save_as_text(self, fname, sort_by_word=True):
         """
         Save this Dictionary to a text file, in format:
-        `id[TAB]word_utf8[TAB]document frequency[NEWLINE]`.
+        `id[TAB]word_utf8[TAB]document frequency[NEWLINE]`. Sorted by word,
+        or by decreasing word frequency.
 
-        Note: use `save`/`load` to store in binary format instead (pickle).
+        Note: text format should be use for corpus inspection. Use `save`/`load`
+        to store in binary format (pickle) for improved performance.
         """
         logger.info("saving dictionary mapping to %s" % fname)
         with utils.smart_open(fname, 'wb') as fout:
-            for token, tokenid in sorted(self.token2id.iteritems()):
-                fout.write("%i\t%s\t%i\n" % (tokenid, token, self.dfs.get(tokenid, 0)))
+            if sort_by_word:
+                for token, tokenid in sorted(iteritems(self.token2id)):
+                    line = "%i\t%s\t%i\n" % (tokenid, token, self.dfs.get(tokenid, 0))
+                    fout.write(utils.to_utf8(line))
+            else:
+                for tokenid, freq in sorted(iteritems(self.dfs), key=lambda item: -item[1]):
+                    line = "%i\t%s\t%i\n" % (tokenid, self[tokenid], freq)
+                    fout.write(utils.to_utf8(line))
 
 
     def merge_with(self, other):
@@ -250,7 +291,7 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
 
         """
         old2new = {}
-        for other_id, other_token in other.iteritems():
+        for other_id, other_token in iteritems(other):
             if other_token in self.token2id:
                 new_id = self.token2id[other_token]
             else:
@@ -281,8 +322,9 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
         Mirror function to `save_as_text`.
         """
         result = Dictionary()
-        with utils.smart_open(fname, 'rb') as f:
+        with utils.smart_open(fname) as f:
             for lineno, line in enumerate(f):
+                line = utils.to_unicode(line)
                 try:
                     wordid, word, docfreq = line[:-1].split('\t')
                 except Exception:
@@ -297,7 +339,7 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
 
 
     @staticmethod
-    def from_corpus(corpus):
+    def from_corpus(corpus, id2word=None):
         """
         Create Dictionary from an existing corpus. This can be useful if you only
         have a term-document BOW matrix (represented by `corpus`), but not the
@@ -305,8 +347,13 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
 
         This will scan the term-document count matrix for all word ids that
         appear in it, then construct and return Dictionary which maps each
-        `word_id -> str(word_id)`.
+        `word_id -> id2word[word_id]`.
+
+        `id2word` is an optional dictionary that maps the `word_id` to a token. In
+        case `id2word` isn't specified the mapping `id2word[word_id] = str(word_id)`
+        will be used.
         """
+
         result = Dictionary()
         max_id = -1
         for docno, document in enumerate(corpus):
@@ -318,9 +365,16 @@ class Dictionary(utils.SaveLoad, UserDict.DictMixin):
                 max_id = max(wordid, max_id)
                 result.num_pos += word_freq
                 result.dfs[wordid] = result.dfs.get(wordid, 0) + 1
-        # now make sure length(result) == get_max_id(corpus) + 1
-        for i in xrange(max_id + 1):
-            result.token2id[str(i)] = i
+
+        if id2word is None:
+            # make sure length(result) == get_max_id(corpus) + 1
+            result.token2id = dict((unicode(i), i) for i in xrange(max_id + 1))
+        else:
+            # id=>word mapping given: simply copy it
+            result.token2id = dict((utils.to_unicode(token), id) for id, token in iteritems(id2word))
+        for id in itervalues(result.token2id):
+            # make sure all token ids have a valid `dfs` entry
+            result.dfs[id] = result.dfs.get(id, 0)
 
         logger.info("built %s from %i documents (total %i corpus positions)" %
                      (result, result.num_docs, result.num_pos))
