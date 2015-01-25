@@ -314,7 +314,6 @@ class LsiModel(interfaces.TransformationABC):
             try:
                 import Pyro4
                 dispatcher = Pyro4.Proxy('PYRONAME:gensim.lsi_dispatcher')
-                dispatcher._pyroOneway.add("exit")
                 logger.debug("looking for dispatcher at %s" % str(dispatcher._pyroUri))
                 dispatcher.initialize(id2word=self.id2word, num_topics=num_topics,
                                       chunksize=chunksize, decay=decay,
@@ -417,6 +416,9 @@ class LsiModel(interfaces.TransformationABC):
         Return latent representation, as a list of (topic_id, topic_value) 2-tuples.
 
         This is done by folding input document into the latent topic space.
+
+        If `scaled` is set, scale topics by the inverse of singular values (default: no scaling).
+
         """
         assert self.projection.u is not None, "decomposition not initialized yet"
 
@@ -449,6 +451,10 @@ class LsiModel(interfaces.TransformationABC):
         #     indices, data = zip(*vec) if vec else ([], [])
         #     topic_dist[:, vecno] = numpy.dot(u.take(indices, axis=0).T, numpy.array(data, dtype=u.dtype))
 
+        if not is_corpus:
+            # convert back from matrix into a 1d vec
+            topic_dist = topic_dist.reshape(-1)
+
         if scaled:
             topic_dist = (1.0 / self.projection.s[:self.num_topics]) * topic_dist # s^-1 * u^-1 * x
 
@@ -456,7 +462,7 @@ class LsiModel(interfaces.TransformationABC):
         # with no zero weights.
         if not is_corpus:
             # lsi[single_document]
-            result = matutils.full2sparse(topic_dist.flat)
+            result = matutils.full2sparse(topic_dist)
         else:
             # lsi[chunk of documents]
             result = matutils.Dense2Corpus(topic_dist)
@@ -466,13 +472,13 @@ class LsiModel(interfaces.TransformationABC):
     def show_topic(self, topicno, topn=10):
         """
         Return a specified topic (=left singular vector), 0 <= `topicno` < `self.num_topics`,
-        as string.
+        as a string.
 
         Return only the `topn` words which contribute the most to the direction
         of the topic (both negative and positive).
 
-        >>> lsimodel.print_topic(10, topn=5)
-        '-0.340 * "category" + 0.298 * "$M$" + 0.183 * "algebra" + -0.174 * "functor" + -0.168 * "operator"'
+        >>> lsimodel.show_topic(10, topn=5)
+        [(-0.340, "category"), (0.298, "$M$"), (0.183, "algebra"), (-0.174, "functor"), (-0.168, "operator")]
 
         """
         # size of the projection matrix can actually be smaller than `self.num_topics`,
@@ -486,6 +492,13 @@ class LsiModel(interfaces.TransformationABC):
         return [(1.0 * c[val] / norm, self.id2word[val]) for val in most]
 
     def print_topic(self, topicno, topn=10):
+        """
+        Return a single topic as a formatted string. See `show_topic()` for parameters.
+
+        >>> lsimodel.print_topic(10, topn=5)
+        '-0.340 * "category" + 0.298 * "$M$" + 0.183 * "algebra" + -0.174 * "functor" + -0.168 * "operator"'
+
+        """
         return ' + '.join(['%.3f*"%s"' % v for v in self.show_topic(topicno, topn)])
 
     def show_topics(self, num_topics=-1, num_words=10, log=False, formatted=True):
