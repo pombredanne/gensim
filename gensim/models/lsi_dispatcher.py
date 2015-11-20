@@ -16,6 +16,7 @@ Example: python -m gensim.models.lsi_dispatcher
 
 from __future__ import with_statement
 import os, sys, logging, threading, time
+from six import iteritems, itervalues
 try:
     from Queue import Queue
 except ImportError:
@@ -71,7 +72,7 @@ class Dispatcher(object):
         self.workers = {}
         with utils.getNS() as ns:
             self.callback = Pyro4.Proxy('PYRONAME:gensim.lsi_dispatcher') # = self
-            for name, uri in ns.list(prefix='gensim.lsi_worker').iteritems():
+            for name, uri in iteritems(ns.list(prefix='gensim.lsi_worker')):
                 try:
                     worker = Pyro4.Proxy(uri)
                     workerid = len(self.workers)
@@ -91,7 +92,7 @@ class Dispatcher(object):
         """
         Return pyro URIs of all registered workers.
         """
-        return [worker._pyroUri for worker in self.workers.itervalues()]
+        return [worker._pyroUri for worker in itervalues(self.workers)]
 
 
     def getjob(self, worker_id):
@@ -121,7 +122,7 @@ class Dispatcher(object):
         # but merging only takes place once, after all input data has been processed,
         # so the overall effect would be small... compared to the amount of coding :-)
         logger.info("merging states from %i workers" % len(self.workers))
-        workers = self.workers.items()
+        workers = list(self.workers.items())
         result = workers[0][1].getstate()
         for workerid, worker in workers[1:]:
             logger.info("pulling state from worker %s" % workerid)
@@ -134,7 +135,7 @@ class Dispatcher(object):
         """
         Initialize all workers for a new decomposition.
         """
-        for workerid, worker in self.workers.iteritems():
+        for workerid, worker in iteritems(self.workers):
             logger.info("resetting worker %s" % workerid)
             worker.reset()
             worker.requestjob()
@@ -167,7 +168,7 @@ class Dispatcher(object):
         """
         Terminate all registered workers and then the dispatcher.
         """
-        for workerid, worker in self.workers.iteritems():
+        for workerid, worker in iteritems(self.workers):
             logger.info("terminating worker %s" % workerid)
             worker.exit()
         logger.info("terminating dispatcher")

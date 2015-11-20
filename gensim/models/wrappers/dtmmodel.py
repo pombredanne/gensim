@@ -13,9 +13,9 @@ This module allows for DTM and DIM model estimation from a training corpus.
 
 Example:
 
->>> model = gensim.models.DtmModel('dtm-win64.exe', my_corpus, my_timeslices, num_topics=20, id2word=dictionary)
+>>> model = gensim.models.wrappers.DtmModel('dtm-win64.exe', my_corpus, my_timeslices, num_topics=20, id2word=dictionary)
 
-.. [1] https://code.google.com/p/princeton-statistical-learning/downloads/detail?name=dtm_release-0.8.tgz
+.. [1] https://github.com/magsilva/dtm/tree/master/bin
 
 """
 
@@ -24,11 +24,11 @@ import logging
 import random
 import tempfile
 import os
-from subprocess import Popen, PIPE
-
+from subprocess import PIPE
 import numpy as np
 
-from gensim import utils, corpora
+from gensim import utils, corpora, matutils
+from gensim.utils import check_output
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,7 @@ class DtmModel(utils.SaveLoad):
     """
 
     def __init__(
-        self, dtm_path, corpus=None, time_slices=None, num_topics=100, id2word=None, prefix=None,
+            self, dtm_path, corpus=None, time_slices=None, mode='fit', model='dtm', num_topics=100, id2word=None, prefix=None,
             lda_sequence_min_iter=6, lda_sequence_max_iter=20, lda_max_em_iter=10, alpha=0.01, top_chain_var=0.005, rng_seed=0, initialize_lda=False):
         """
         `dtm_path` is path to the dtm executable, e.g. `C:/dtm/dtm-win64.exe`.
@@ -49,6 +49,11 @@ class DtmModel(utils.SaveLoad):
         `corpus` is a gensim corpus, aka a stream of sparse document vectors.
 
         `id2word` is a mapping between tokens ids and token.
+
+        `mode` controls the mode of the mode: 'fit' is for training, 'time' for
+        analyzing documents through time according to a DTM, basically a held out set.
+
+        `model` controls the choice of model. 'fixed' is for DIM and 'dtm' for DTM.
 
         `lda_sequence_min_iter` min iteration of LDA.
 
@@ -65,6 +70,9 @@ class DtmModel(utils.SaveLoad):
         `initialize_lda` initialize DTM with LDA.
 
         """
+        if not os.path.isfile(dtm_path):
+            raise ValueError("dtm_path must point to the binary file, not to a folder")
+
         self.dtm_path = dtm_path
         self.id2word = id2word
         if self.id2word is None:
@@ -113,7 +121,7 @@ class DtmModel(utils.SaveLoad):
         self.influences_time = []
 
         if corpus is not None:
-            self.train(corpus, time_slices)
+            self.train(corpus, time_slices, mode, model)
 
     def fout_liklihoods(self):
         return self.prefix + 'train_out/lda-seq/' + 'lhoods.dat'
@@ -168,14 +176,9 @@ class DtmModel(utils.SaveLoad):
             for sl in time_slices:
                 fout.write(str(sl) + "\n")
 
-    def train(self, corpus, time_slices, mode='fit', model='fixed'):
+    def train(self, corpus, time_slices, mode, model):
         """
         Train DTM model using specified corpus and time slices.
-
-        'mode' controls the mode of the mode: 'fit' is for training, 'time' for
-        analyzing documents through time according to a DTM, basically a held out set.
-
-        'model' controls the coice of model. 'fixed' is for DIM and 'dtm' for DTM.
 
         """
         self.convert_input(corpus, time_slices)
@@ -188,15 +191,17 @@ class DtmModel(utils.SaveLoad):
 
         arguments = arguments + " " + params
         logger.info("training DTM with args %s" % arguments)
-        try:
-            p = Popen([self.dtm_path] + arguments.split(), stdout=PIPE, stderr=PIPE)
-            p.communicate()
-        except KeyboardInterrupt:
-            p.terminate()
+
+        cmd = [self.dtm_path] + arguments.split()
+        logger.info("Running command %s" % cmd)
+        check_output(cmd, stderr=PIPE)
+
         self.em_steps = np.loadtxt(self.fem_steps())
-        self.init_alpha = np.loadtxt(self.finit_alpha())
-        self.init_beta = np.loadtxt(self.finit_beta())
         self.init_ss = np.loadtxt(self.flda_ss())
+
+        if self.initialize_lda:
+            self.init_alpha = np.loadtxt(self.finit_alpha())
+            self.init_beta = np.loadtxt(self.finit_beta())
 
         self.lhood_ = np.loadtxt(self.fout_liklihoods())
 
@@ -254,11 +259,11 @@ class DtmModel(utils.SaveLoad):
             # chosen_topics = sorted_topics[: topics / 2] + \
             #     sorted_topics[-topics / 2:]
 
-        if times < 0 or times >= self.time_slices:
-            times = self.time_slices
+        if times < 0 or times >= len(self.time_slices):
+            times = len(self.time_slices)
             chosen_times = range(times)
         else:
-            times = min(times, self.time_slices)
+            times = min(times, len(self.time_slices))
             chosen_times = range(times)
 
         shown = []
@@ -287,7 +292,7 @@ class DtmModel(utils.SaveLoad):
         # normalize to probability dist
         topic = topic / topic.sum()
         # sort according to prob
-        bestn = np.argsort(topic)[::-1][:topn]
+        bestn = matutils.argsort(topic, topn, reverse=True)
         beststr = [(topic[id], self.id2word[id]) for id in bestn]
         return beststr
 

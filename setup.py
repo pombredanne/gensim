@@ -13,14 +13,16 @@ sudo python ./setup.py install
 import os
 import sys
 import warnings
+import io
 
 if sys.version_info[:2] < (2, 6):
-    raise Exception('This version of gensim needs Python 2.6 or later. ')
+    raise Exception('This version of gensim needs Python 2.6 or later.')
 
 import ez_setup
 ez_setup.use_setuptools()
 from setuptools import setup, find_packages, Extension
 from setuptools.command.build_ext import build_ext
+
 
 # the following code is adapted from tornado's setup.py:
 # https://github.com/tornadoweb/tornado/blob/master/setup.py
@@ -29,7 +31,7 @@ from setuptools.command.build_ext import build_ext
 class custom_build_ext(build_ext):
     """Allow C extension building to fail.
 
-    The C extension speeds up word2vec training, but is not essential.
+    The C extension speeds up word2vec and doc2vec training, but is not essential.
     """
 
     warning_message = """
@@ -66,8 +68,9 @@ http://api.mongodb.org/python/current/installation.html#osx
         except Exception:
             e = sys.exc_info()[1]
             sys.stdout.write('%s\n' % str(e))
-            warnings.warn(self.warning_message,
-                "Extension modules",
+            warnings.warn(
+                self.warning_message +
+                "Extension modules" +
                 "There was an issue with your platform configuration - see above.")
 
     def build_extension(self, ext):
@@ -77,8 +80,9 @@ http://api.mongodb.org/python/current/installation.html#osx
         except Exception:
             e = sys.exc_info()[1]
             sys.stdout.write('%s\n' % str(e))
-            warnings.warn(self.warning_message,
-                "The %s extension module" % (name,),
+            warnings.warn(
+                self.warning_message +
+                "The %s extension module" % (name,) +
                 "The output above this warning shows how the compilation failed.")
 
     # the following is needed to be able to add numpy's include dirs... without
@@ -98,13 +102,21 @@ http://api.mongodb.org/python/current/installation.html#osx
 
 
 def readfile(fname):
-    return open(os.path.join(os.path.dirname(__file__), fname)).read()
+    path = os.path.join(os.path.dirname(__file__), fname)
+    return io.open(path, encoding='utf8').read()
 
 model_dir = os.path.join(os.path.dirname(__file__), 'gensim', 'models')
 
+cmdclass = {'build_ext': custom_build_ext}
+
+WHEELHOUSE_UPLOADER_COMMANDS = set(['fetch_artifacts', 'upload_all'])
+if WHEELHOUSE_UPLOADER_COMMANDS.intersection(sys.argv):
+    import wheelhouse_uploader.cmd
+    cmdclass.update(vars(wheelhouse_uploader.cmd))
+
 setup(
     name='gensim',
-    version='0.10.3',
+    version='0.12.3',
     description='Python framework for fast Vector Space Modelling',
     long_description=readfile('README.rst'),
 
@@ -116,11 +128,10 @@ setup(
             sources=['./gensim/models/doc2vec_inner.c'],
             include_dirs=[model_dir]),
     ],
-    cmdclass={'build_ext': custom_build_ext},
+    cmdclass=cmdclass,
     packages=find_packages(),
 
-    # there is a bug in python2.5, preventing distutils from using any non-ascii characters :( http://bugs.python.org/issue2562
-    author='Radim Rehurek', # u'Radim Řehůřek', # <- should really be this...,
+    author=u'Radim Rehurek',
     author_email='me@radimrehurek.com',
 
     url='http://radimrehurek.com/gensim',
@@ -136,7 +147,7 @@ setup(
 
     zip_safe=False,
 
-    classifiers=[ # from http://pypi.python.org/pypi?%3Aaction=list_classifiers
+    classifiers=[  # from http://pypi.python.org/pypi?%3Aaction=list_classifiers
         'Development Status :: 5 - Production/Stable',
         'Environment :: Console',
         'Intended Audience :: Science/Research',
@@ -150,13 +161,14 @@ setup(
     ],
 
     test_suite="gensim.test",
-    setup_requires = [
+    setup_requires=[
         'numpy >= 1.3'
     ],
     install_requires=[
         'numpy >= 1.3',
         'scipy >= 0.7.0',
-        'six >= 1.2.0',
+        'six >= 1.5.0',
+        'smart_open >= 1.2.1',
     ],
 
     extras_require={
