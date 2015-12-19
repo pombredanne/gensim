@@ -4,14 +4,18 @@ gensim -- Topic Modelling in Python
 
 |Travis|_
 |Downloads|_
+|Wheel|_
 |License|_
 
-.. |Travis| image:: https://api.travis-ci.org/piskvorky/gensim.png?branch=develop
-.. |Downloads| image:: https://pypip.in/d/gensim/badge.png?style=flat
-.. |License| image:: https://pypip.in/license/gensim/badge.png?style=flat
+.. |Travis| image:: https://img.shields.io/travis/piskvorky/gensim/develop.svg
+.. |Downloads| image:: https://img.shields.io/pypi/dm/gensim.svg
+.. |License| image:: https://img.shields.io/pypi/l/gensim.svg
+.. |Wheel| image:: https://img.shields.io/pypi/wheel/gensim.svg
+
 .. _Travis: https://travis-ci.org/piskvorky/gensim
 .. _Downloads: https://pypi.python.org/pypi/gensim
 .. _License: http://radimrehurek.com/gensim/about.html
+.. _Wheel: https://pypi.python.org/pypi/gensim
 
 Gensim is a Python library for *topic modelling*, *document indexing* and *similarity retrieval* with large corpora.
 Target audience is the *natural language processing* (NLP) and *information retrieval* (IR) community.
@@ -19,7 +23,7 @@ Target audience is the *natural language processing* (NLP) and *information retr
 Features
 ---------
 
-* All algorithms are **memory-independent** w.r.t. the corpus size (can process input larger than RAM),
+* All algorithms are **memory-independent** w.r.t. the corpus size (can process input larger than RAM, streamed, out-of-core),
 * **Intuitive interfaces**
 
   * easy to plug in your own input corpus/datastream (trivial streaming API)
@@ -48,7 +52,7 @@ The simple way to install `gensim` is::
     pip install -U gensim
 
 Or, if you have instead downloaded and unzipped the `source tar.gz <http://pypi.python.org/pypi/gensim>`_ package,
-you'll need to run::
+you'd run::
 
     python setup.py test
     python setup.py install
@@ -57,7 +61,7 @@ you'll need to run::
 For alternative modes of installation (without root privileges, development
 installation, optional install features), see the `documentation <http://radimrehurek.com/gensim/install.html>`_.
 
-This version has been tested under Python 2.6, 2.7, 3.3 and 3.4 (support for Python 2.5 was dropped in gensim 0.10.0; install gensim 0.9.1 if you *must* use Python 2.5). Gensim's github repo is hooked to `Travis CI for automated testing <https://travis-ci.org/piskvorky/gensim>`_ on every commit push and pull request.
+This version has been tested under Python 2.6, 2.7, 3.3, 3.4 and 3.5 (support for Python 2.5 was dropped in gensim 0.10.0; install gensim 0.9.1 if you *must* use Python 2.5). Gensim's github repo is hooked to `Travis CI for automated testing <https://travis-ci.org/piskvorky/gensim>`_ on every commit push and pull request.
 
 How come gensim is so fast and memory efficient? Isn't it pure Python, and isn't Python slow and greedy?
 --------------------------------------------------------------------------------------------------------
@@ -77,3 +81,8 @@ It is also included in the source distribution package.
 
 Gensim is open source software released under the `GNU LGPL license <http://www.gnu.org/licenses/lgpl.html>`_.
 Copyright (c) 2009-now Radim Rehurek
+
+|Analytics|_
+
+.. |Analytics| image:: https://ga-beacon.appspot.com/UA-24066335-5/your-repo/page-name
+.. _Analytics: https://github.com/igrigorik/ga-beacon
